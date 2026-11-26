@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Noor AI</string>
+    <string name="accessibility_service_description">Allows Noor AI to read active screen context and perform authorized navigation actions when requested by you.</string>
+    <string name="notification_listener_label">Noor AI Notification Reader</string>
+    <string name="foreground_service_channel_name">Noor Voice Wake Word</string>
+    <string name="reminder_channel_name">Noor Personal Reminders</string>
+</resources>
