@@ -18,6 +18,7 @@ import com.google.firebase.ai.type.FunctionCallPart
 import com.google.firebase.ai.type.FunctionDeclaration
 import com.google.firebase.ai.type.FunctionResponsePart
 import com.google.firebase.ai.type.GenerateContentResponse
+import com.google.firebase.ai.type.InlineDataPart
 import com.google.firebase.ai.type.Schema
 import com.google.firebase.ai.type.Tool
 import com.google.firebase.ai.type.content
@@ -250,6 +251,63 @@ class NoorAgentBrain(
             Log.e(TAG, "Agent turn failed", e)
             AgentTurnOutcome.Error(
                 e.localizedMessage ?: "AI رابطے میں خرابی پیش آئی۔ انٹرنیٹ اور Firebase App Check چیک کریں۔"
+            )
+        }
+    }
+
+    suspend fun runAudioAgentTurn(
+        wavBytes: ByteArray,
+        durationSeconds: Int,
+        settings: AssistantSettings,
+        permissions: PermissionDashboardState,
+        recentMessages: List<ConversationMessageEntity>,
+        memories: List<MemoryFactEntity>,
+        onPlanProgress: (String) -> Unit
+    ): AgentTurnOutcome {
+        return try {
+            onPlanProgress("آواز سن کر سمجھ رہی ہوں...")
+            val systemText = buildSystemPrompt(settings, permissions, memories)
+            val model = Firebase.ai.generativeModel(
+                modelName = MODEL_NAME,
+                systemInstruction = content { text(systemText) },
+                tools = listOf(Tool.functionDeclarations(toolDeclarations))
+            )
+
+            val chatHistory = recentMessages.takeLast(14).map { msg ->
+                val role = if (msg.role == "user") "user" else "model"
+                content(role) { text(msg.text) }
+            }
+            val chat = model.startChat(history = chatHistory)
+
+            val audioPrompt = "Listen carefully to this ${durationSeconds}s voice recording from the user in Pakistani Urdu, English, or mixed Urdu-English. Understand both their request and their emotional tone, call any required device tools, and reply naturally in Pakistani Urdu."
+
+            val initialResponse = withTimeout(60_000L) {
+                chat.sendMessage(
+                    content("user") {
+                        part(InlineDataPart(wavBytes, "audio/wav"))
+                        text(audioPrompt)
+                    }
+                )
+            }
+
+            processModelResponse(
+                chat = chat,
+                initialResponse = initialResponse,
+                originalCommand = "🎤 Voice Recording (${durationSeconds}s)",
+                confirmSensitive = settings.confirmSensitiveActions,
+                accumulatedTools = mutableListOf("audio_record_wav"),
+                planSteps = mutableListOf("صوتی ریکارڈنگ سنی اور تجزیہ کیا"),
+                onPlanProgress = onPlanProgress
+            )
+        } catch (e: TimeoutCancellationException) {
+            Log.e(TAG, "Audio agent turn timed out", e)
+            AgentTurnOutcome.Error("آواز پراسیس کرنے میں 60 سیکنڈ سے زیادہ وقت لگ گیا۔")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Audio agent turn failed", e)
+            AgentTurnOutcome.Error(
+                e.localizedMessage ?: "آواز پراسیس کرنے میں خرابی پیش آئی۔"
             )
         }
     }

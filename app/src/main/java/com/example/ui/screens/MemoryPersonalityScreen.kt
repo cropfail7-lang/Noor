@@ -82,6 +82,7 @@ fun MemoryPersonalityScreen(
     memories: List<MemoryFactEntity>,
     micPermissionGranted: Boolean,
     isWakeWordRunning: Boolean,
+    isVoiceActivationRunning: Boolean,
     onUpdateUserName: (String) -> Unit,
     onUpdateWakeWord: (String) -> Unit,
     onUpdatePersonality: (AssistantPersonality) -> Unit,
@@ -91,6 +92,7 @@ fun MemoryPersonalityScreen(
     onUpdateVoiceSpeed: (Float) -> Unit,
     onUpdateVoicePitch: (Float) -> Unit,
     onToggleHandsFree: (Boolean) -> Unit,
+    onToggleVoiceActivation: (Boolean) -> Unit,
     onRequestMicPermission: () -> Unit,
     onAddMemory: (String, String, Int) -> Unit,
     onDeleteMemory: (Long) -> Unit,
@@ -216,6 +218,20 @@ fun MemoryPersonalityScreen(
                                 }
                             },
                             testTag = "hands_free_switch"
+                        )
+
+                        SettingToggleRow(
+                            title = "Audio Energy Voice Activation (VAD)",
+                            subtitle = if (isVoiceActivationRunning) "AudioRecord service actively detecting speech" else "Triggers listening when direct speech is detected",
+                            checked = isVoiceActivationRunning,
+                            onCheckedChange = { wantEnable ->
+                                if (wantEnable && !micPermissionGranted) {
+                                    onRequestMicPermission()
+                                } else {
+                                    onToggleVoiceActivation(wantEnable)
+                                }
+                            },
+                            testTag = "vad_activation_switch"
                         )
 
                         SettingToggleRow(

@@ -33,11 +33,13 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Hearing
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Voicemail
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -113,11 +115,18 @@ fun HomeChatScreen(
     isListening: Boolean,
     isSpeaking: Boolean,
     isWakeWordRunning: Boolean,
+    isAudioRecording: Boolean,
+    isVoiceActivationRunning: Boolean,
+    audioRecordingDurationSec: Int,
+    audioServiceError: String?,
     rmsLevel: Float,
     partialTranscript: String,
     micPermissionGranted: Boolean,
     onRequestMicPermission: () -> Unit,
     onToggleListening: () -> Unit,
+    onStartAudioRecording: () -> Unit,
+    onStopAndProcessAudio: () -> Unit,
+    onCancelAudioRecording: () -> Unit,
     onSendCommand: (String) -> Unit,
     onSpeakMessage: (String) -> Unit,
     onConfirmAction: (Boolean) -> Unit,
@@ -185,20 +194,34 @@ fun HomeChatScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
+                        val anyActiveActivation = isWakeWordRunning || isVoiceActivationRunning || isAudioRecording
                         Icon(
-                            imageVector = if (isWakeWordRunning) Icons.Default.Hearing else Icons.Default.AutoAwesome,
+                            imageVector = when {
+                                isAudioRecording -> Icons.Default.FiberManualRecord
+                                isWakeWordRunning || isVoiceActivationRunning -> Icons.Default.Hearing
+                                else -> Icons.Default.AutoAwesome
+                            },
                             contentDescription = "Wake status",
-                            tint = if (isWakeWordRunning) NoorEmerald else TextSecondary,
+                            tint = when {
+                                isAudioRecording -> NoorRose
+                                anyActiveActivation -> NoorEmerald
+                                else -> TextSecondary
+                            },
                             modifier = Modifier.size(14.dp)
                         )
                         Text(
-                            text = if (isWakeWordRunning) {
-                                "Hands-free: \"${settings.wakeWord}\""
-                            } else {
-                                settings.personality.titleUrdu
+                            text = when {
+                                isAudioRecording -> "Recording Audio (${audioRecordingDurationSec}s)"
+                                isWakeWordRunning -> "Hands-free: \"${settings.wakeWord}\""
+                                isVoiceActivationRunning -> "Voice Activation (VAD) Active"
+                                else -> settings.personality.titleUrdu
                             },
                             style = MaterialTheme.typography.bodyMedium,
-                            color = if (isWakeWordRunning) NoorEmerald else TextSecondary
+                            color = when {
+                                isAudioRecording -> NoorRose
+                                anyActiveActivation -> NoorEmerald
+                                else -> TextSecondary
+                            }
                         )
                     }
                 }
@@ -236,7 +259,7 @@ fun HomeChatScreen(
             ) {
                 NoorOrbVisualizer(
                     emotion = currentEmotion,
-                    isListening = isListening,
+                    isListening = isListening || isAudioRecording,
                     isSpeaking = isSpeaking,
                     isThinking = isThinking,
                     rmsLevel = rmsLevel,
@@ -244,9 +267,10 @@ fun HomeChatScreen(
                 )
 
                 VoiceWaveformStrip(
-                    isActive = isListening || isSpeaking || isThinking,
+                    isActive = isListening || isAudioRecording || isSpeaking || isThinking,
                     rmsLevel = if (isSpeaking) 0.65f else rmsLevel,
                     accentColor = when {
+                        isAudioRecording -> NoorRose
                         isListening -> NoorEmerald
                         isSpeaking -> NoorGold
                         isThinking -> NoorIndigo
@@ -255,10 +279,12 @@ fun HomeChatScreen(
                 )
 
                 val statusLabel = when {
+                    isAudioRecording -> "آواز ریکارڈ ہو رہی ہے (${audioRecordingDurationSec}s) — مکمل کر کے بھیجیں"
                     isListening && partialTranscript.isNotBlank() -> partialTranscript
                     isListening -> "سن رہی ہوں... اردو یا انگلش میں بولیں"
                     isThinking -> (brainState as BrainUiState.Thinking).stepLabel
                     isSpeaking -> "نور بول رہی ہے..."
+                    !audioServiceError.isNullOrBlank() -> audioServiceError
                     else -> "حاضر ہوں — حکم دیجیے"
                 }
                 Text(
@@ -268,7 +294,7 @@ fun HomeChatScreen(
                         fontSize = 14.sp,
                         textDirection = TextDirection.Content
                     ),
-                    color = TextSecondary,
+                    color = if (!audioServiceError.isNullOrBlank() && !isAudioRecording) NoorRose else TextSecondary,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.padding(top = 4.dp, bottom = 6.dp)
                 )
@@ -423,118 +449,203 @@ fun HomeChatScreen(
                 }
             }
 
-            // Bottom Command Composer
+            // Bottom Command Composer or Live Audio Recording Bar
             Surface(
-                color = ObsidianSurface,
+                color = if (isAudioRecording) NoorRoseContainer else ObsidianSurface,
                 shape = RoundedCornerShape(24.dp),
-                border = BorderStroke(1.dp, ObsidianBorder),
+                border = BorderStroke(
+                    1.dp,
+                    if (isAudioRecording) NoorRose.copy(alpha = 0.7f) else ObsidianBorder
+                ),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 10.dp, top = 4.dp)
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(
-                        onClick = onOpenVision,
+                if (isAudioRecording) {
+                    Row(
                         modifier = Modifier
-                            .size(48.dp)
-                            .testTag("quick_vision_button")
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.CameraAlt,
-                            contentDescription = "Open Camera Vision",
-                            tint = NoorGold
-                        )
-                    }
-
-                    OutlinedTextField(
-                        value = inputText,
-                        onValueChange = { inputText = it },
-                        placeholder = {
-                            Text(
-                                text = "اردو یا انگلش میں لکھیں...",
-                                style = TextStyle(fontFamily = UrduFontFamily, fontSize = 14.sp),
-                                color = TextMuted
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.FiberManualRecord,
+                                contentDescription = "Recording active",
+                                tint = NoorRose,
+                                modifier = Modifier.size(16.dp)
                             )
-                        },
-                        singleLine = true,
-                        textStyle = TextStyle(
-                            fontFamily = UrduFontFamily,
-                            fontSize = 15.sp,
-                            color = TextPrimary,
-                            textDirection = TextDirection.Content
-                        ),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = Color.Transparent,
-                            unfocusedBorderColor = Color.Transparent,
-                            cursorColor = NoorCyan
-                        ),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(
-                            onSend = {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "REC %02d:%02d".format(
+                                    audioRecordingDurationSec / 60,
+                                    audioRecordingDurationSec % 60
+                                ),
+                                style = MaterialTheme.typography.titleMedium,
+                                color = TextPrimary
+                            )
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = onCancelAudioRecording,
+                                border = BorderStroke(1.dp, NoorRose),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = NoorRose),
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("cancel_audio_recording_button")
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = "Cancel recording")
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Cancel")
+                            }
+
+                            Button(
+                                onClick = onStopAndProcessAudio,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = NoorEmerald,
+                                    contentColor = ObsidianVoid
+                                ),
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("send_audio_recording_button")
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Process voice recording")
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Send")
+                            }
+                        }
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 6.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = onOpenVision,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("quick_vision_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CameraAlt,
+                                contentDescription = "Open Camera Vision",
+                                tint = NoorGold
+                            )
+                        }
+
+                        OutlinedTextField(
+                            value = inputText,
+                            onValueChange = { inputText = it },
+                            placeholder = {
+                                Text(
+                                    text = "اردو یا انگلش میں لکھیں...",
+                                    style = TextStyle(fontFamily = UrduFontFamily, fontSize = 14.sp),
+                                    color = TextMuted
+                                )
+                            },
+                            singleLine = true,
+                            textStyle = TextStyle(
+                                fontFamily = UrduFontFamily,
+                                fontSize = 15.sp,
+                                color = TextPrimary,
+                                textDirection = TextDirection.Content
+                            ),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color.Transparent,
+                                unfocusedBorderColor = Color.Transparent,
+                                cursorColor = NoorCyan
+                            ),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(
+                                onSend = {
+                                    if (inputText.isNotBlank()) {
+                                        onSendCommand(inputText)
+                                        inputText = ""
+                                    }
+                                }
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("chat_input_field")
+                        )
+
+                        FilledIconButton(
+                            onClick = {
+                                if (micPermissionGranted) {
+                                    onStartAudioRecording()
+                                } else {
+                                    onRequestMicPermission()
+                                }
+                            },
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = ObsidianSurfaceElevated,
+                                contentColor = NoorGold
+                            ),
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("record_audio_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Voicemail,
+                                contentDescription = "Record audio clip"
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(4.dp))
+
+                        FilledIconButton(
+                            onClick = {
+                                if (micPermissionGranted) {
+                                    onToggleListening()
+                                } else {
+                                    onRequestMicPermission()
+                                }
+                            },
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = if (isListening) NoorEmerald else ObsidianSurfaceElevated,
+                                contentColor = if (isListening) ObsidianVoid else NoorCyan
+                            ),
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("mic_toggle_button")
+                        ) {
+                            Icon(
+                                imageVector = when {
+                                    isListening -> Icons.Default.GraphicEq
+                                    micPermissionGranted -> Icons.Default.Mic
+                                    else -> Icons.Default.MicOff
+                                },
+                                contentDescription = if (isListening) "Stop listening" else "Voice command"
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(4.dp))
+
+                        FilledIconButton(
+                            onClick = {
                                 if (inputText.isNotBlank()) {
                                     onSendCommand(inputText)
                                     inputText = ""
                                 }
-                            }
-                        ),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("chat_input_field")
-                    )
-
-                    FilledIconButton(
-                        onClick = {
-                            if (micPermissionGranted) {
-                                onToggleListening()
-                            } else {
-                                onRequestMicPermission()
-                            }
-                        },
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = if (isListening) NoorEmerald else ObsidianSurfaceElevated,
-                            contentColor = if (isListening) ObsidianVoid else NoorCyan
-                        ),
-                        modifier = Modifier
-                            .size(48.dp)
-                            .testTag("mic_toggle_button")
-                    ) {
-                        Icon(
-                            imageVector = when {
-                                isListening -> Icons.Default.GraphicEq
-                                micPermissionGranted -> Icons.Default.Mic
-                                else -> Icons.Default.MicOff
                             },
-                            contentDescription = if (isListening) "Stop listening" else "Voice command"
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(6.dp))
-
-                    FilledIconButton(
-                        onClick = {
-                            if (inputText.isNotBlank()) {
-                                onSendCommand(inputText)
-                                inputText = ""
-                            }
-                        },
-                        enabled = inputText.isNotBlank() && !isThinking,
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = NoorCyan,
-                            contentColor = ObsidianVoid
-                        ),
-                        modifier = Modifier
-                            .size(48.dp)
-                            .testTag("send_message_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Send,
-                            contentDescription = "Send command"
-                        )
+                            enabled = inputText.isNotBlank() && !isThinking,
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = NoorCyan,
+                                contentColor = ObsidianVoid
+                            ),
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("send_message_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Send,
+                                contentDescription = "Send command"
+                            )
+                        }
                     }
                 }
             }

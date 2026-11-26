@@ -1,7 +1,9 @@
 package com.example
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -34,11 +36,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavDestination.Companion.hierarchy
@@ -48,8 +53,11 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.ai.configureAppCheck
+import com.example.device.PermissionStatusChecker
+import com.example.service.AudioRecordingService
 import com.example.service.NoorForegroundService
 import com.example.ui.NoorViewModel
+import com.example.ui.components.MicPermissionDialog
 import com.example.ui.screens.CameraVisionScreen
 import com.example.ui.screens.ControlHistoryScreen
 import com.example.ui.screens.HomeChatScreen
@@ -139,20 +147,53 @@ private fun NoorAppRoot(viewModel: NoorViewModel) {
     val visionState by viewModel.visionState.collectAsStateWithLifecycle()
     val vaultEntries by viewModel.vaultEntries.collectAsStateWithLifecycle()
 
+    val context = LocalContext.current
+    val activity = context as? Activity
+
     val isListening by viewModel.voiceManager.isListening.collectAsStateWithLifecycle()
     val isSpeaking by viewModel.voiceManager.isSpeaking.collectAsStateWithLifecycle()
-    val rmsLevel by viewModel.voiceManager.rmsLevel.collectAsStateWithLifecycle()
+    val sttRmsLevel by viewModel.voiceManager.rmsLevel.collectAsStateWithLifecycle()
     val partialTranscript by viewModel.voiceManager.partialTranscript.collectAsStateWithLifecycle()
     val isWakeWordRunning by NoorForegroundService.isRunning.collectAsStateWithLifecycle()
 
-    var pendingVisionQuestion by remember { mutableStateOf("") }
+    val isAudioRecording by AudioRecordingService.isRecording.collectAsStateWithLifecycle()
+    val isVoiceActivationRunning by AudioRecordingService.isVoiceActivationMonitoring.collectAsStateWithLifecycle()
+    val audioRmsLevel by AudioRecordingService.recordingRmsLevel.collectAsStateWithLifecycle()
+    val audioDurationSec by AudioRecordingService.recordingDurationSec.collectAsStateWithLifecycle()
+    val audioServiceError by AudioRecordingService.serviceError.collectAsStateWithLifecycle()
 
-    val micPermLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
+    val effectiveRms = maxOf(sttRmsLevel, audioRmsLevel)
+
+    var pendingVisionQuestion by remember { mutableStateOf("") }
+    var showMicPermissionDialog by remember { mutableStateOf(false) }
+    var micPermissionPurpose by remember { mutableStateOf("آواز ریکارڈ کرنے اور وائس ایکٹیویشن") }
+    var pendingMicAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var hasAskedMicOnce by rememberSaveable { mutableStateOf(false) }
+
+    val micAndNotifLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        hasAskedMicOnce = true
         viewModel.refreshPermissions()
-        if (granted) {
-            viewModel.startVoiceListening()
+        val micGranted = results[Manifest.permission.RECORD_AUDIO] == true ||
+            viewModel.permissions.value.microphoneGranted
+        if (micGranted) {
+            showMicPermissionDialog = false
+            pendingMicAction?.invoke()
+            pendingMicAction = null
+        } else {
+            showMicPermissionDialog = true
+        }
+    }
+
+    val requestMicFlow: (String, () -> Unit) -> Unit = { purpose, onGranted ->
+        viewModel.refreshPermissions()
+        if (viewModel.permissions.value.microphoneGranted) {
+            onGranted()
+        } else {
+            micPermissionPurpose = purpose
+            pendingMicAction = onGranted
+            showMicPermissionDialog = true
         }
     }
 
@@ -247,16 +288,29 @@ private fun NoorAppRoot(viewModel: NoorViewModel) {
                             isListening = isListening,
                             isSpeaking = isSpeaking,
                             isWakeWordRunning = isWakeWordRunning,
-                            rmsLevel = rmsLevel,
+                            isAudioRecording = isAudioRecording,
+                            isVoiceActivationRunning = isVoiceActivationRunning,
+                            audioRecordingDurationSec = audioDurationSec,
+                            audioServiceError = audioServiceError,
+                            rmsLevel = effectiveRms,
                             partialTranscript = partialTranscript,
                             micPermissionGranted = permissions.microphoneGranted,
                             onRequestMicPermission = {
-                                micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                requestMicFlow("آواز سننے") {
+                                    viewModel.startVoiceListening()
+                                }
                             },
                             onToggleListening = {
                                 if (isListening) viewModel.stopVoiceListening()
                                 else viewModel.startVoiceListening()
                             },
+                            onStartAudioRecording = {
+                                requestMicFlow("آواز ریکارڈ کر کے پراسیس کرنے") {
+                                    viewModel.startAudioRecording()
+                                }
+                            },
+                            onStopAndProcessAudio = viewModel::stopAndProcessAudioRecording,
+                            onCancelAudioRecording = viewModel::cancelAudioRecording,
                             onSendCommand = viewModel::sendUserCommand,
                             onSpeakMessage = viewModel::speakText,
                             onConfirmAction = viewModel::resolveConfirmation,
@@ -283,6 +337,7 @@ private fun NoorAppRoot(viewModel: NoorViewModel) {
                             memories = memories,
                             micPermissionGranted = permissions.microphoneGranted,
                             isWakeWordRunning = isWakeWordRunning,
+                            isVoiceActivationRunning = isVoiceActivationRunning,
                             onUpdateUserName = viewModel::updateUserName,
                             onUpdateWakeWord = viewModel::updateWakeWord,
                             onUpdatePersonality = viewModel::updatePersonality,
@@ -291,9 +346,28 @@ private fun NoorAppRoot(viewModel: NoorViewModel) {
                             onUpdateConfirmSensitive = viewModel::updateConfirmSensitive,
                             onUpdateVoiceSpeed = viewModel::updateVoiceSpeed,
                             onUpdateVoicePitch = viewModel::updateVoicePitch,
-                            onToggleHandsFree = viewModel::toggleHandsFreeService,
+                            onToggleHandsFree = { enable ->
+                                if (enable) {
+                                    requestMicFlow("ہینڈز فری ویک ورڈ چلانے") {
+                                        viewModel.toggleHandsFreeService(true)
+                                    }
+                                } else {
+                                    viewModel.toggleHandsFreeService(false)
+                                }
+                            },
+                            onToggleVoiceActivation = { enable ->
+                                if (enable) {
+                                    requestMicFlow("وائس ایکٹیویشن سروس آن کرنے") {
+                                        viewModel.toggleVoiceActivationMonitor(true)
+                                    }
+                                } else {
+                                    viewModel.toggleVoiceActivationMonitor(false)
+                                }
+                            },
                             onRequestMicPermission = {
-                                micPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                requestMicFlow("وائس ایکٹیویشن آن کرنے") {
+                                    viewModel.toggleVoiceActivationMonitor(true)
+                                }
                             },
                             onAddMemory = viewModel::addManualMemory,
                             onDeleteMemory = viewModel::deleteMemory,
@@ -324,6 +398,40 @@ private fun NoorAppRoot(viewModel: NoorViewModel) {
                     }
                 }
             }
+        }
+
+        if (showMicPermissionDialog) {
+            val isPermanentlyDenied = hasAskedMicOnce &&
+                !permissions.microphoneGranted &&
+                activity != null &&
+                !ActivityCompat.shouldShowRequestPermissionRationale(
+                    activity,
+                    Manifest.permission.RECORD_AUDIO
+                )
+
+            MicPermissionDialog(
+                isPermanentlyDenied = isPermanentlyDenied,
+                purposeLabel = micPermissionPurpose,
+                onRequestPermission = {
+                    val permsToAsk = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        arrayOf(
+                            Manifest.permission.RECORD_AUDIO,
+                            Manifest.permission.POST_NOTIFICATIONS
+                        )
+                    } else {
+                        arrayOf(Manifest.permission.RECORD_AUDIO)
+                    }
+                    micAndNotifLauncher.launch(permsToAsk)
+                },
+                onOpenSettings = {
+                    showMicPermissionDialog = false
+                    PermissionStatusChecker.openAppDetailsSettings(context)
+                },
+                onDismiss = {
+                    showMicPermissionDialog = false
+                    pendingMicAction = null
+                }
+            )
         }
     }
 }

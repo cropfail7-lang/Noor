@@ -23,7 +23,9 @@ import com.example.data.security.VaultSecretEntry
 import com.example.device.DeviceActionExecutor
 import com.example.device.PermissionDashboardState
 import com.example.device.PermissionStatusChecker
+import com.example.service.AudioRecordingService
 import com.example.service.NoorForegroundService
+import com.example.service.RecordedAudioClip
 import com.example.service.VoiceAssistantManager
 import com.example.work.AssistantWorkScheduler
 import kotlinx.coroutines.Job
@@ -116,6 +118,19 @@ class NoorViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         viewModelScope.launch {
+            AudioRecordingService.completedAudioEvents.collect { clip ->
+                processRecordedAudioClip(clip)
+            }
+        }
+        viewModelScope.launch {
+            AudioRecordingService.voiceActivationDetectedEvents.collect {
+                if (_permissions.value.microphoneGranted && !voiceManager.isListening.value) {
+                    AudioRecordingService.stopVoiceActivationMonitor(context)
+                    startVoiceListening()
+                }
+            }
+        }
+        viewModelScope.launch {
             seedWelcomeIfNeeded()
         }
     }
@@ -140,6 +155,9 @@ class NoorViewModel(application: Application) : AndroidViewModel(application) {
     fun startVoiceListening() {
         refreshPermissions()
         if (!_permissions.value.microphoneGranted) return
+        if (AudioRecordingService.isRecording.value) {
+            AudioRecordingService.cancelRecording(context)
+        }
         val langTag = when (settings.value.languageMode) {
             LanguageMode.ENGLISH -> "en-PK"
             else -> "ur-PK"
@@ -151,6 +169,63 @@ class NoorViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stopVoiceListening() {
         voiceManager.stopListening()
+    }
+
+    fun startAudioRecording() {
+        refreshPermissions()
+        if (!_permissions.value.microphoneGranted) return
+        voiceManager.emergencyStop()
+        AudioRecordingService.clearError()
+        AudioRecordingService.startRecording(context)
+    }
+
+    fun stopAndProcessAudioRecording() {
+        AudioRecordingService.stopAndProcess(context)
+    }
+
+    fun cancelAudioRecording() {
+        AudioRecordingService.cancelRecording(context)
+    }
+
+    fun toggleVoiceActivationMonitor(enabled: Boolean) {
+        refreshPermissions()
+        if (enabled && _permissions.value.microphoneGranted) {
+            AudioRecordingService.startVoiceActivationMonitor(context)
+        } else {
+            AudioRecordingService.stopVoiceActivationMonitor(context)
+        }
+    }
+
+    private fun processRecordedAudioClip(clip: RecordedAudioClip) {
+        activeTurnJob?.cancel()
+        activeTurnJob = viewModelScope.launch {
+            repository.addMessage(
+                ConversationMessageEntity(
+                    role = "user",
+                    text = "🎤 صوتی پیغام (${clip.durationSeconds} سیکنڈ)",
+                    emotionTag = NoorEmotion.CALM.id
+                )
+            )
+            _brainState.value = BrainUiState.Thinking("آپ کی ریکارڈ شدہ آواز سن رہی ہوں...")
+            refreshPermissions()
+
+            val currentSettings = settings.value
+            val recent = repository.getRecentMessages(16)
+            val mems = repository.getTopMemories(35)
+
+            val outcome = brain.runAudioAgentTurn(
+                wavBytes = clip.wavBytes,
+                durationSeconds = clip.durationSeconds,
+                settings = currentSettings,
+                permissions = _permissions.value,
+                recentMessages = recent,
+                memories = mems,
+                onPlanProgress = { step ->
+                    _brainState.value = BrainUiState.Thinking(step)
+                }
+            )
+            handleAgentOutcome(outcome, currentSettings)
+        }
     }
 
     fun speakText(text: String) {
@@ -295,6 +370,7 @@ class NoorViewModel(application: Application) : AndroidViewModel(application) {
         _currentEmotion.value = NoorEmotion.CALM
         voiceManager.emergencyStop()
         NoorForegroundService.stop(context)
+        AudioRecordingService.cancelRecording(context)
         viewModelScope.launch {
             preferences.setHandsFreeEnabled(false)
         }
